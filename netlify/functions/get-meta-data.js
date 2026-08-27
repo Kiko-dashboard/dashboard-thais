@@ -77,12 +77,34 @@ exports.handler = async function (event, context) {
       resultado[key] = finalizarGrupo(grupos[key], key);
     });
 
+    // 4. Busca o histórico de gasto diário (últimos 7 dias) para o gráfico de evolução
+    let historicoGasto = [];
+    try {
+      const historicoUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/insights?level=account&time_increment=1&date_preset=last_7d&fields=spend,date_start&access_token=${ACCESS_TOKEN}`;
+      const historicoRes = await fetch(historicoUrl);
+      const historicoData = await historicoRes.json();
+      if (!historicoData.error && historicoData.data) {
+        historicoGasto = historicoData.data.map((d) => ({
+          date: d.date_start,
+          spend: parseFloat(d.spend || 0),
+        }));
+      }
+    } catch (e) {
+      // Se o histórico falhar, o dashboard ainda funciona sem o gráfico
+      historicoGasto = [];
+    }
+
+    // Seguidores: preparado para receber o dado da Instagram Graph API (integração futura)
+    const seguidores = null;
+
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         atualizado_em: new Date().toISOString(),
         dados: resultado,
+        historico_gasto: historicoGasto,
+        seguidores: seguidores,
       }),
     };
   } catch (err) {
