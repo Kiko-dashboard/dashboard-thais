@@ -1,5 +1,9 @@
 // Esta função roda no servidor do Netlify (nunca no navegador do cliente),
 // então o token de acesso fica protegido e nunca aparece pra quem visualiza o dashboard.
+//
+// A partir desta versão, o dashboard é organizado por FASE da campanha
+// (Fase 1, Fase 2, Fase 3), identificada pelo nome da campanha na Meta
+// (ex: "[Fase 1]", "[Fase 02]", "[Fase 3]"), em vez de por objetivo.
 
 exports.handler = async function (event, context) {
   const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
@@ -17,94 +21,60 @@ exports.handler = async function (event, context) {
   }
 
   try {
-    // 1. Busca as campanhas ativas e seus objetivos
-    const campaignsUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/campaigns?fields=id,name,objective,status&access_token=${ACCESS_TOKEN}`;
+    // 1. Busca todas as campanhas e identifica a qual Fase cada uma pertence,
+    // com base no nome da campanha.
+    const campaignsUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/campaigns?fields=id,name,status&limit=200&access_token=${ACCESS_TOKEN}`;
     const campaignsRes = await fetch(campaignsUrl);
     const campaignsData = await campaignsRes.json();
 
     if (campaignsData.error) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: campaignsData.error.message }),
-      };
+      return { statusCode: 500, body: JSON.stringify({ error: campaignsData.error.message }) };
     }
 
     const campaigns = campaignsData.data || [];
-    const objectiveByCampaignId = {};
+    const idsPorFase = { fase1: [], fase2: [], fase3: [] };
+
     campaigns.forEach((c) => {
-      objectiveByCampaignId[c.id] = classifyObjective(c.objective);
+      const fase = detectarFase(c.name);
+      if (fase) idsPorFase[fase].push(c.id);
     });
 
-    // 2. Busca os resultados (insights) por campanha nos últimos 7 dias
-    const insightsUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/insights?level=campaign&date_preset=last_7d&fields=campaign_id,spend,reach,inline_link_clicks,actions,action_values&access_token=${ACCESS_TOKEN}`;
-    const insightsRes = await fetch(insightsUrl);
-    const insightsData = await insightsRes.json();
+    // 2. Busca os insights de cada fase, com os campos específicos que cada uma precisa.
+    // Período: últimos 7 dias (mesmo padrão usado no resto do dashboard).
+    const fase1Rows = await buscarInsights(
+      idsPorFase.fase1,
+      "spend,impressions,inline_link_clicks,actions",
+      AD_ACCOUNT_ID,
+      API_VERSION,
+      ACCESS_TOKEN
+    );
+    const fase2Rows = await buscarInsights(
+      idsPorFase.fase2,
+      "spend,impressions,actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions",
+      AD_ACCOUNT_ID,
+      API_VERSION,
+      ACCESS_TOKEN
+    );
+    const fase3Rows = await buscarInsights(
+      idsPorFase.fase3,
+      "spend,impressions,reach,actions",
+      AD_ACCOUNT_ID,
+      API_VERSION,
+      ACCESS_TOKEN
+    );
 
-    if (insightsData.error) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: insightsData.error.message }),
-      };
-    }
-
-    const rows = insightsData.data || [];
-
-    // 3. Agrega os números por grupo de objetivo (leads, vendas, engajamento, trafego)
-    const grupos = {
-      todas: criarGrupoVazio(),
-      leads: criarGrupoVazio(),
-      vendas: criarGrupoVazio(),
-      engajamento: criarGrupoVazio(),
-      trafego: criarGrupoVazio(),
-    };
-
-    rows.forEach((row) => {
-      const grupo = objectiveByCampaignId[row.campaign_id] || "outros";
-      const spend = parseFloat(row.spend || 0);
-      const reach = parseInt(row.reach || 0, 10);
-      const clicks = parseInt(row.inline_link_clicks || 0, 10);
-      const actions = row.actions || [];
-      const actionValues = row.action_values || [];
-
-      somarNoGrupo(grupos.todas, spend, reach, clicks, actions, actionValues, "todas");
-      if (grupos[grupo]) {
-        somarNoGrupo(grupos[grupo], spend, reach, clicks, actions, actionValues, grupo);
-      }
-    });
-
-    const resultado = {};
-    Object.keys(grupos).forEach((key) => {
-      resultado[key] = finalizarGrupo(grupos[key], key);
-    });
-
-    // 4. Busca o histórico de gasto diário (últimos 7 dias) para o gráfico de evolução
-    let historicoGasto = [];
-    try {
-      const historicoUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/insights?level=account&time_increment=1&date_preset=last_7d&fields=spend,date_start&access_token=${ACCESS_TOKEN}`;
-      const historicoRes = await fetch(historicoUrl);
-      const historicoData = await historicoRes.json();
-      if (!historicoData.error && historicoData.data) {
-        historicoGasto = historicoData.data.map((d) => ({
-          date: d.date_start,
-          spend: parseFloat(d.spend || 0),
-        }));
-      }
-    } catch (e) {
-      // Se o histórico falhar, o dashboard ainda funciona sem o gráfico
-      historicoGasto = [];
-    }
-
-    // Seguidores: preparado para receber o dado da Instagram Graph API (integração futura)
-    const seguidores = null;
+    const fase1 = montarFase1(fase1Rows);
+    const fase2 = montarFase2(fase2Rows);
+    const fase3 = montarFase3(fase3Rows);
 
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         atualizado_em: new Date().toISOString(),
-        dados: resultado,
-        historico_gasto: historicoGasto,
-        seguidores: seguidores,
+        fase1,
+        fase2,
+        fase3,
       }),
     };
   } catch (err) {
@@ -115,77 +85,132 @@ exports.handler = async function (event, context) {
   }
 };
 
-// Classifica o objetivo "cru" da Meta (que vem em inglês e formatos variados)
-// em um dos 4 grupos que usamos no dashboard.
-function classifyObjective(objective) {
-  if (!objective) return "outros";
-  const o = objective.toUpperCase();
-  if (o.includes("LEAD")) return "leads";
-  if (o.includes("SALES") || o.includes("CONVERSION")) return "vendas";
-  if (o.includes("ENGAGEMENT")) return "engajamento";
-  if (o.includes("TRAFFIC") || o.includes("LINK_CLICKS")) return "trafego";
-  return "outros";
+// Identifica a fase pelo nome da campanha. Aceita "Fase 1", "Fase 01", "Fase 2",
+// "Fase 02", "Fase 3", "Fase 03", em qualquer posição do nome, maiúsculo ou minúsculo.
+function detectarFase(nome) {
+  if (!nome) return null;
+  const n = nome.toLowerCase();
+  if (/fase\s*0?1\b/.test(n)) return "fase1";
+  if (/fase\s*0?2\b/.test(n)) return "fase2";
+  if (/fase\s*0?3\b/.test(n)) return "fase3";
+  return null;
 }
 
-function criarGrupoVazio() {
-  return { spend: 0, reach: 0, clicks: 0, resultado: 0, valorConversao: 0 };
+async function buscarInsights(ids, fields, adAccountId, apiVersion, accessToken) {
+  if (!ids.length) return [];
+  const filtering = encodeURIComponent(
+    JSON.stringify([{ field: "campaign.id", operator: "IN", value: ids }])
+  );
+  const url = `https://graph.facebook.com/${apiVersion}/${adAccountId}/insights?level=campaign&date_preset=last_7d&filtering=${filtering}&fields=${fields}&access_token=${accessToken}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.data || [];
 }
 
-function somarNoGrupo(grupo, spend, reach, clicks, actions, actionValues, tipoGrupo) {
-  grupo.spend += spend;
-  grupo.reach += reach;
-  grupo.clicks += clicks;
+function somaCampo(rows, campo) {
+  return rows.reduce((acc, r) => acc + parseFloat(r[campo] || 0), 0);
+}
 
-  // Escolhe qual "ação" da Meta representa o resultado, dependendo do grupo
-  const mapaAcao = {
-    leads: ["lead", "onsite_conversion.lead_grouped"],
-    vendas: ["purchase", "offsite_conversion.fb_pixel_purchase", "onsite_web_purchase"],
-    engajamento: ["post_engagement"],
-    trafego: ["link_click"],
-    todas: ["lead", "onsite_conversion.lead_grouped", "purchase", "offsite_conversion.fb_pixel_purchase", "onsite_web_purchase", "post_engagement"],
-  };
-  const tiposAceitos = mapaAcao[tipoGrupo] || [];
-
-  actions.forEach((a) => {
-    if (tiposAceitos.includes(a.action_type)) {
-      grupo.resultado += parseInt(a.value || 0, 10);
-    }
+// Soma valores de "actions" (o array de resultados que a Meta devolve) filtrando
+// por tipo de ação. Usado para leads, conversas de mensagem, seguidores, etc.
+function valorDeAction(rows, tiposAceitos) {
+  let total = 0;
+  rows.forEach((r) => {
+    (r.actions || []).forEach((a) => {
+      if (tiposAceitos.includes(a.action_type)) total += parseInt(a.value || 0, 10);
+    });
   });
-
-  actionValues.forEach((a) => {
-    if (a.action_type === "purchase" || a.action_type === "offsite_conversion.fb_pixel_purchase") {
-      grupo.valorConversao += parseFloat(a.value || 0);
-    }
-  });
+  return total;
 }
 
-function finalizarGrupo(grupo, tipoGrupo) {
-  const custoPorResultado = grupo.resultado > 0 ? grupo.spend / grupo.resultado : 0;
-  const roas = grupo.spend > 0 ? grupo.valorConversao / grupo.spend : 0;
+// Soma campos de vídeo, que vêm como array (ex: video_p25_watched_actions).
+function valorDeVideoField(rows, campo) {
+  return rows.reduce((acc, r) => {
+    const arr = r[campo];
+    if (arr && arr[0] && arr[0].value) return acc + parseInt(arr[0].value, 10);
+    return acc;
+  }, 0);
+}
 
-  const labels = {
-    todas: "Resultados",
-    leads: "Cadastros",
-    vendas: "Compras",
-    engajamento: "Interações",
-    trafego: "Cliques no link",
-  };
-  const custoLabels = {
-    todas: "Custo por resultado",
-    leads: "Custo por cadastro",
-    vendas: "Custo por venda",
-    engajamento: "Custo por interação",
-    trafego: "Custo por clique",
-  };
+function montarFase1(rows) {
+  if (!rows.length) return null;
+
+  const investimento = somaCampo(rows, "spend");
+  const impressoes = somaCampo(rows, "impressions");
+  const cliques = somaCampo(rows, "inline_link_clicks");
+  const cpm = impressoes > 0 ? investimento / (impressoes / 1000) : 0;
+  const ctr = impressoes > 0 ? (cliques / impressoes) * 100 : 0;
+
+  // NOTA IMPORTANTE: "Seguidores" aqui ainda usa o mesmo tipo de dado do
+  // Gerenciador de Anúncios (não é o ideal, conforme combinado). No futuro,
+  // isso será substituído por um número vindo direto do perfil da Thaís via
+  // Instagram Graph API, separando seguidores orgânicos de seguidores pagos.
+  const seguidores = valorDeAction(rows, ["follow", "onsite_conversion.follow", "like"]);
+  const custoPorSeguidor = seguidores > 0 ? investimento / seguidores : null;
 
   return {
-    gasto: grupo.spend,
-    alcance: grupo.reach,
-    cliques: grupo.clicks,
-    resultLabel: labels[tipoGrupo],
-    resultado: tipoGrupo === "trafego" ? grupo.clicks : grupo.resultado,
-    custoLabel: custoLabels[tipoGrupo],
-    custoPorResultado: custoPorResultado,
-    roas: tipoGrupo === "vendas" || tipoGrupo === "todas" ? roas : null,
+    investimento,
+    impressoes,
+    cliques,
+    cpm,
+    ctr,
+    seguidores: seguidores > 0 ? seguidores : null,
+    custoPorSeguidor,
+  };
+}
+
+function montarFase2(rows) {
+  if (!rows.length) return null;
+
+  const investimento = somaCampo(rows, "spend");
+  const impressoes = somaCampo(rows, "impressions");
+  const cpm = impressoes > 0 ? investimento / (impressoes / 1000) : 0;
+
+  const views3s = valorDeAction(rows, ["video_view"]);
+  const views25 = valorDeVideoField(rows, "video_p25_watched_actions");
+  const views50 = valorDeVideoField(rows, "video_p50_watched_actions");
+  const views75 = valorDeVideoField(rows, "video_p75_watched_actions");
+  const views95 = valorDeVideoField(rows, "video_p95_watched_actions");
+  const cpv95 = views95 > 0 ? investimento / views95 : 0;
+
+  const pct = (a, b) => (b > 0 ? (a / b) * 100 : 0);
+
+  return {
+    investimento,
+    impressoes,
+    cpm,
+    views3s,
+    views25,
+    views50,
+    views75,
+    views95,
+    cpv95,
+    str: pct(views3s, impressoes),
+    retHook: pct(views25, views3s),
+    retStory1: pct(views50, views25),
+    retStory2: pct(views75, views50),
+    retOffer: pct(views95, views75),
+  };
+}
+
+function montarFase3(rows) {
+  if (!rows.length) return null;
+
+  const investimento = somaCampo(rows, "spend");
+  const impressoes = somaCampo(rows, "impressions");
+  const alcance = somaCampo(rows, "reach");
+  const cpm = impressoes > 0 ? investimento / (impressoes / 1000) : 0;
+
+  const conversas = valorDeAction(rows, ["onsite_conversion.messaging_conversation_started_7d"]);
+  const custoPorConversa = conversas > 0 ? investimento / conversas : 0;
+
+  return {
+    investimento,
+    impressoes,
+    alcance,
+    cpm,
+    conversas,
+    custoPorConversa,
   };
 }
