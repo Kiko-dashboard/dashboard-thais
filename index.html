@@ -1,114 +1,191 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Desempenho de Anúncios - Thaís Oliveira</title>
-<style>
-  body {
-    background: #0b0c0f;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    margin: 0;
-    padding: 24px;
-    display: flex;
-    justify-content: center;
-  }
-  .card-container {
-    background: #14151a;
-    border-radius: 16px;
-    padding: 24px;
-    width: 100%;
-    max-width: 480px;
-  }
-  .title { text-align: center; color: #f2f2f0; font-size: 20px; font-weight: 500; margin-bottom: 4px; }
-  .subtitle { color: #9a9a95; font-size: 13px; margin-bottom: 16px; }
-  .updated { color: #6b6b66; font-size: 11px; margin-bottom: 16px; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
-  .tab {
-    border: none; border-radius: 8px; padding: 6px 14px; font-size: 13px;
-    cursor: pointer; background: #1e2027; color: #9a9a95;
-  }
-  .tab.active { background: #3c69d8; color: #ffffff; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-  .metric-card { background: #1e2027; border-radius: 10px; padding: 14px; }
-  .metric-label { color: #9a9a95; font-size: 12px; margin-bottom: 6px; }
-  .metric-value { color: #f2f2f0; font-size: 20px; font-weight: 500; }
-  .loading { color: #9a9a95; text-align: center; padding: 40px 0; }
-  .error { color: #e08080; text-align: center; padding: 20px 0; font-size: 13px; }
-</style>
-</head>
-<body>
-  <div class="card-container">
-    <div class="title">Desempenho de Anúncios</div>
-    <div class="subtitle">Thaís Oliveira</div>
-    <div class="updated" id="updated"></div>
-    <div id="tabs" class="tabs"></div>
-    <div id="content">
-      <div class="loading">Carregando dados...</div>
-    </div>
-  </div>
+// Esta função roda no servidor do Netlify (nunca no navegador do cliente),
+// então o token de acesso fica protegido e nunca aparece pra quem visualiza o dashboard.
 
-<script>
-const labels = { todas: "Todas", leads: "Leads", vendas: "Vendas", engajamento: "Engajamento", trafego: "Tráfego" };
-let dados = null;
-let active = "todas";
+exports.handler = async function (event, context) {
+  const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+  const AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID; // formato: act_1234567890
+  const API_VERSION = "v21.0";
 
-function formatarMoeda(v) {
-  return "R$ " + Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (!ACCESS_TOKEN || !AD_ACCOUNT_ID) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error:
+          "Configuração incompleta: defina META_ACCESS_TOKEN e META_AD_ACCOUNT_ID nas variáveis de ambiente do Netlify.",
+      }),
+    };
+  }
+
+  try {
+    // 1. Busca as campanhas ativas e seus objetivos
+    const campaignsUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/campaigns?fields=id,name,objective,status&access_token=${ACCESS_TOKEN}`;
+    const campaignsRes = await fetch(campaignsUrl);
+    const campaignsData = await campaignsRes.json();
+
+    if (campaignsData.error) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: campaignsData.error.message }),
+      };
+    }
+
+    const campaigns = campaignsData.data || [];
+    const objectiveByCampaignId = {};
+    campaigns.forEach((c) => {
+      objectiveByCampaignId[c.id] = classifyObjective(c.objective);
+    });
+
+    // 2. Busca os resultados (insights) por campanha nos últimos 7 dias
+    const insightsUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/insights?level=campaign&date_preset=last_7d&fields=campaign_id,spend,reach,inline_link_clicks,actions,action_values&access_token=${ACCESS_TOKEN}`;
+    const insightsRes = await fetch(insightsUrl);
+    const insightsData = await insightsRes.json();
+
+    if (insightsData.error) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: insightsData.error.message }),
+      };
+    }
+
+    const rows = insightsData.data || [];
+
+    // 3. Agrega os números por grupo de objetivo (leads, vendas, engajamento, trafego)
+    const grupos = {
+      todas: criarGrupoVazio(),
+      leads: criarGrupoVazio(),
+      vendas: criarGrupoVazio(),
+      engajamento: criarGrupoVazio(),
+      trafego: criarGrupoVazio(),
+    };
+
+    rows.forEach((row) => {
+      const grupo = objectiveByCampaignId[row.campaign_id] || "outros";
+      const spend = parseFloat(row.spend || 0);
+      const reach = parseInt(row.reach || 0, 10);
+      const clicks = parseInt(row.inline_link_clicks || 0, 10);
+      const actions = row.actions || [];
+      const actionValues = row.action_values || [];
+
+      somarNoGrupo(grupos.todas, spend, reach, clicks, actions, actionValues, "todas");
+      if (grupos[grupo]) {
+        somarNoGrupo(grupos[grupo], spend, reach, clicks, actions, actionValues, grupo);
+      }
+    });
+
+    const resultado = {};
+    Object.keys(grupos).forEach((key) => {
+      resultado[key] = finalizarGrupo(grupos[key], key);
+    });
+
+    // 4. Busca o histórico de gasto diário (últimos 7 dias) para o gráfico de evolução
+    let historicoGasto = [];
+    try {
+      const historicoUrl = `https://graph.facebook.com/${API_VERSION}/${AD_ACCOUNT_ID}/insights?level=account&time_increment=1&date_preset=last_7d&fields=spend,date_start&access_token=${ACCESS_TOKEN}`;
+      const historicoRes = await fetch(historicoUrl);
+      const historicoData = await historicoRes.json();
+      if (!historicoData.error && historicoData.data) {
+        historicoGasto = historicoData.data.map((d) => ({
+          date: d.date_start,
+          spend: parseFloat(d.spend || 0),
+        }));
+      }
+    } catch (e) {
+      // Se o histórico falhar, o dashboard ainda funciona sem o gráfico
+      historicoGasto = [];
+    }
+
+    // Seguidores: preparado para receber o dado da Instagram Graph API (integração futura)
+    const seguidores = null;
+
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        atualizado_em: new Date().toISOString(),
+        dados: resultado,
+        historico_gasto: historicoGasto,
+        seguidores: seguidores,
+      }),
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: err.message }),
+    };
+  }
+};
+
+// Classifica o objetivo "cru" da Meta (que vem em inglês e formatos variados)
+// em um dos 4 grupos que usamos no dashboard.
+function classifyObjective(objective) {
+  if (!objective) return "outros";
+  const o = objective.toUpperCase();
+  if (o.includes("LEAD")) return "leads";
+  if (o.includes("SALES") || o.includes("CONVERSION")) return "vendas";
+  if (o.includes("ENGAGEMENT")) return "engajamento";
+  if (o.includes("TRAFFIC") || o.includes("LINK_CLICKS")) return "trafego";
+  return "outros";
 }
-function formatarNumero(v) {
-  return Number(v).toLocaleString("pt-BR");
+
+function criarGrupoVazio() {
+  return { spend: 0, reach: 0, clicks: 0, resultado: 0, valorConversao: 0 };
 }
 
-function renderTabs() {
-  const tabsEl = document.getElementById("tabs");
-  tabsEl.innerHTML = "";
-  Object.keys(labels).forEach((key) => {
-    const btn = document.createElement("button");
-    btn.textContent = labels[key];
-    btn.className = "tab" + (key === active ? " active" : "");
-    btn.onclick = () => { active = key; renderTabs(); renderContent(); };
-    tabsEl.appendChild(btn);
+function somarNoGrupo(grupo, spend, reach, clicks, actions, actionValues, tipoGrupo) {
+  grupo.spend += spend;
+  grupo.reach += reach;
+  grupo.clicks += clicks;
+
+  // Escolhe qual "ação" da Meta representa o resultado, dependendo do grupo
+  const mapaAcao = {
+    leads: ["lead", "onsite_conversion.lead_grouped"],
+    vendas: ["purchase", "offsite_conversion.fb_pixel_purchase", "onsite_web_purchase"],
+    engajamento: ["post_engagement"],
+    trafego: ["link_click"],
+    todas: ["lead", "onsite_conversion.lead_grouped", "purchase", "offsite_conversion.fb_pixel_purchase", "onsite_web_purchase", "post_engagement"],
+  };
+  const tiposAceitos = mapaAcao[tipoGrupo] || [];
+
+  actions.forEach((a) => {
+    if (tiposAceitos.includes(a.action_type)) {
+      grupo.resultado += parseInt(a.value || 0, 10);
+    }
+  });
+
+  actionValues.forEach((a) => {
+    if (a.action_type === "purchase" || a.action_type === "offsite_conversion.fb_pixel_purchase") {
+      grupo.valorConversao += parseFloat(a.value || 0);
+    }
   });
 }
 
-function renderContent() {
-  const d = dados[active];
-  const roasCard = d.roas !== null
-    ? `<div class="metric-card"><div class="metric-label">ROAS</div><div class="metric-value">${d.roas.toFixed(1)}x</div></div>`
-    : `<div class="metric-card" style="opacity:0.4"><div class="metric-label">ROAS</div><div class="metric-value">—</div></div>`;
+function finalizarGrupo(grupo, tipoGrupo) {
+  const custoPorResultado = grupo.resultado > 0 ? grupo.spend / grupo.resultado : 0;
+  const roas = grupo.spend > 0 ? grupo.valorConversao / grupo.spend : 0;
 
-  document.getElementById("content").innerHTML = `
-    <div class="grid">
-      <div class="metric-card"><div class="metric-label">Valor gasto</div><div class="metric-value">${formatarMoeda(d.gasto)}</div></div>
-      <div class="metric-card"><div class="metric-label">Alcance</div><div class="metric-value">${formatarNumero(d.alcance)}</div></div>
-      <div class="metric-card"><div class="metric-label">Cliques no link</div><div class="metric-value">${formatarNumero(d.cliques)}</div></div>
-      <div class="metric-card"><div class="metric-label">${d.resultLabel}</div><div class="metric-value">${formatarNumero(d.resultado)}</div></div>
-      <div class="metric-card"><div class="metric-label">${d.custoLabel}</div><div class="metric-value">${formatarMoeda(d.custoPorResultado)}</div></div>
-      ${roasCard}
-    </div>
-  `;
+  const labels = {
+    todas: "Resultados",
+    leads: "Cadastros",
+    vendas: "Compras",
+    engajamento: "Interações",
+    trafego: "Cliques no link",
+  };
+  const custoLabels = {
+    todas: "Custo por resultado",
+    leads: "Custo por cadastro",
+    vendas: "Custo por venda",
+    engajamento: "Custo por interação",
+    trafego: "Custo por clique",
+  };
+
+  return {
+    gasto: grupo.spend,
+    alcance: grupo.reach,
+    cliques: grupo.clicks,
+    resultLabel: labels[tipoGrupo],
+    resultado: tipoGrupo === "trafego" ? grupo.clicks : grupo.resultado,
+    custoLabel: custoLabels[tipoGrupo],
+    custoPorResultado: custoPorResultado,
+    roas: tipoGrupo === "vendas" || tipoGrupo === "todas" ? roas : null,
+  };
 }
-
-async function carregar() {
-  try {
-    const res = await fetch("/.netlify/functions/get-meta-data");
-    const json = await res.json();
-    if (json.error) {
-      document.getElementById("content").innerHTML = `<div class="error">Erro ao buscar dados: ${json.error}</div>`;
-      return;
-    }
-    dados = json.dados;
-    document.getElementById("updated").textContent =
-      "Atualizado em " + new Date(json.atualizado_em).toLocaleString("pt-BR");
-    renderTabs();
-    renderContent();
-  } catch (e) {
-    document.getElementById("content").innerHTML = `<div class="error">Não foi possível carregar os dados.</div>`;
-  }
-}
-
-carregar();
-</script>
-</body>
-</html>
