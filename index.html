@@ -18,7 +18,7 @@
     border-radius: 16px;
     padding: 24px;
     width: 100%;
-    max-width: 480px;
+    max-width: 640px;
   }
   .header { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
   .avatar {
@@ -30,30 +30,57 @@
   .title { color: #f2f2f0; font-size: 19px; font-weight: 500; margin: 0; }
   .subtitle { color: #c98aa3; font-size: 13px; margin: 2px 0 0; }
   .updated { color: #6b5a5f; font-size: 11px; margin-bottom: 16px; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
   .tab {
     border: none; border-radius: 8px; padding: 6px 14px; font-size: 13px;
     cursor: pointer; background: #2a2226; color: #c98aa3;
   }
   .tab.active { background: #d4537e; color: #ffffff; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-  .metric-card { background: #2a2226; border-radius: 10px; padding: 14px; }
-  .metric-label { color: #c98aa3; font-size: 12px; margin-bottom: 6px; }
-  .metric-value { color: #f2f2f0; font-size: 20px; font-weight: 500; }
-  .chart-card { background: #2a2226; border-radius: 10px; padding: 16px; }
-  .chart-label { color: #c98aa3; font-size: 12px; margin-bottom: 10px; }
-  .bars { display: flex; align-items: flex-end; gap: 6px; height: 80px; }
-  .bar { flex: 1; border-radius: 4px 4px 0 0; background: #8a3f5c; min-height: 3px; }
-  .bar.recent { background: #d4537e; }
+
+  /* Cards de destaque no topo de cada fase */
+  .highlight-row { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .highlight-card {
+    flex: 1; min-width: 140px; background: #2a2226; border-radius: 10px;
+    padding: 14px; display: flex; align-items: center; gap: 10px;
+  }
+  .highlight-icon {
+    width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+    background: #3a2b30; display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .highlight-label { color: #c98aa3; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 2px; }
+  .highlight-value { color: #f2f2f0; font-size: 17px; font-weight: 600; }
+
+  /* Funil */
+  .funnel-label { color: #c98aa3; font-size: 12px; margin-bottom: 10px; }
+  .funnel-row {
+    display: flex; align-items: center; gap: 4px;
+    overflow-x: auto; padding-bottom: 6px;
+  }
+  .funnel-step {
+    background: #2a2226; border-radius: 10px; padding: 10px 12px;
+    flex-shrink: 0; min-width: 92px; text-align: center;
+  }
+  .funnel-step-label { color: #c98aa3; font-size: 10px; margin-bottom: 4px; white-space: nowrap; }
+  .funnel-step-value { color: #f2f2f0; font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .funnel-arrow {
+    flex-shrink: 0; display: flex; flex-direction: column; align-items: center;
+    color: #6b5a5f; font-size: 13px; padding: 0 2px;
+  }
+  .funnel-arrow-label {
+    color: #d4537e; font-size: 10px; font-weight: 600; margin-bottom: 2px; white-space: nowrap;
+  }
+
   .loading { color: #c98aa3; text-align: center; padding: 40px 0; }
   .error { color: #e08080; text-align: center; padding: 20px 0; font-size: 13px; }
+  .empty { color: #6b5a5f; text-align: center; padding: 20px 0; font-size: 13px; }
 
   @media (max-width: 520px) {
     body { padding: 12px 8px; }
     .card-container { padding: 16px; border-radius: 12px; }
-    .grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .title { font-size: 16px; }
-    .metric-value { font-size: 17px; }
+    .highlight-value { font-size: 15px; }
     .tab { padding: 6px 10px; font-size: 12px; }
   }
 </style>
@@ -75,17 +102,18 @@
   </div>
 
 <script>
-const labels = { todas: "Todas", leads: "Leads", vendas: "Vendas", engajamento: "Engajamento", trafego: "Tráfego" };
+const labels = { fase1: "Fase 1", fase2: "Fase 2", fase3: "Fase 3" };
 let dados = null;
-let historico = [];
-let seguidores = null;
-let active = "todas";
+let active = "fase1";
 
 function formatarMoeda(v) {
-  return "R$ " + Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return "R$ " + Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function formatarNumero(v) {
-  return Number(v).toLocaleString("pt-BR");
+  return Number(v || 0).toLocaleString("pt-BR");
+}
+function formatarPercent(v) {
+  return Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + "%";
 }
 
 function renderTabs() {
@@ -100,42 +128,123 @@ function renderTabs() {
   });
 }
 
-function renderBars() {
-  if (!historico.length) return "";
-  const max = Math.max(...historico.map(h => h.spend), 1);
-  const bars = historico.map((h, i) => {
-    const pct = Math.max((h.spend / max) * 100, 2);
-    const recent = i >= historico.length - 2 ? " recent" : "";
-    return `<div class="bar${recent}" style="height:${pct}%"></div>`;
-  }).join("");
+function highlightCard(icon, label, value) {
   return `
-    <div class="chart-card" style="margin-bottom:16px;">
-      <div class="chart-label">Gasto por dia (última semana)</div>
-      <div class="bars">${bars}</div>
+    <div class="highlight-card">
+      <div class="highlight-icon">${icon}</div>
+      <div>
+        <div class="highlight-label">${label}</div>
+        <div class="highlight-value">${value}</div>
+      </div>
     </div>`;
+}
+
+function funnelStep(label, value) {
+  return `
+    <div class="funnel-step">
+      <div class="funnel-step-label">${label}</div>
+      <div class="funnel-step-value">${value}</div>
+    </div>`;
+}
+
+function funnelArrow(label) {
+  return `
+    <div class="funnel-arrow">
+      ${label ? `<div class="funnel-arrow-label">${label}</div>` : ""}
+      <div>&#8594;</div>
+    </div>`;
+}
+
+function renderFase1(d) {
+  const seguidoresValor = d.seguidores !== null ? formatarNumero(d.seguidores) : "—";
+  const custoPorSeguidorValor = d.custoPorSeguidor !== null ? formatarMoeda(d.custoPorSeguidor) : "—";
+
+  const highlights = [
+    highlightCard("💰", "Investimento", formatarMoeda(d.investimento)),
+    highlightCard("👥", "Seguidores", seguidoresValor),
+    highlightCard("📈", "Custo por Seguidor", custoPorSeguidorValor),
+  ].join("");
+
+  const funnel = [
+    funnelStep("Investimento", formatarMoeda(d.investimento)),
+    funnelArrow("CPM " + formatarMoeda(d.cpm)),
+    funnelStep("Impressões", formatarNumero(d.impressoes)),
+    funnelArrow("CTR " + formatarPercent(d.ctr)),
+    funnelStep("Cliques no link", formatarNumero(d.cliques)),
+    funnelArrow(),
+    funnelStep("Seguidores", seguidoresValor),
+  ].join("");
+
+  return `
+    <div class="highlight-row">${highlights}</div>
+    <div class="funnel-label">Funil da Fase 1</div>
+    <div class="funnel-row">${funnel}</div>`;
+}
+
+function renderFase2(d) {
+  const highlights = [
+    highlightCard("💰", "Investimento", formatarMoeda(d.investimento)),
+    highlightCard("🎬", "Views 95%", formatarNumero(d.views95)),
+    highlightCard("📈", "CPV95", formatarMoeda(d.cpv95)),
+  ].join("");
+
+  const funnel = [
+    funnelStep("Investimento", formatarMoeda(d.investimento)),
+    funnelArrow("CPM " + formatarMoeda(d.cpm)),
+    funnelStep("Impressões", formatarNumero(d.impressoes)),
+    funnelArrow("STR " + formatarPercent(d.str)),
+    funnelStep("Views 3s", formatarNumero(d.views3s)),
+    funnelArrow("Ret. Hook " + formatarPercent(d.retHook)),
+    funnelStep("Views 25%", formatarNumero(d.views25)),
+    funnelArrow("Ret. Story 1 " + formatarPercent(d.retStory1)),
+    funnelStep("Views 50%", formatarNumero(d.views50)),
+    funnelArrow("Ret. Story 2 " + formatarPercent(d.retStory2)),
+    funnelStep("Views 75%", formatarNumero(d.views75)),
+    funnelArrow("Ret. Offer " + formatarPercent(d.retOffer)),
+    funnelStep("Views 95%", formatarNumero(d.views95)),
+  ].join("");
+
+  return `
+    <div class="highlight-row">${highlights}</div>
+    <div class="funnel-label">Funil da Fase 2</div>
+    <div class="funnel-row">${funnel}</div>`;
+}
+
+function renderFase3(d) {
+  const highlights = [
+    highlightCard("💰", "Investimento", formatarMoeda(d.investimento)),
+    highlightCard("💬", "Conversas iniciadas", formatarNumero(d.conversas)),
+    highlightCard("📈", "Custo por conversa", formatarMoeda(d.custoPorConversa)),
+  ].join("");
+
+  const funnel = [
+    funnelStep("Investimento", formatarMoeda(d.investimento)),
+    funnelArrow("CPM " + formatarMoeda(d.cpm)),
+    funnelStep("Impressões", formatarNumero(d.impressoes)),
+    funnelArrow(),
+    funnelStep("Alcance", formatarNumero(d.alcance)),
+    funnelArrow(),
+    funnelStep("Conversas iniciadas", formatarNumero(d.conversas)),
+  ].join("");
+
+  return `
+    <div class="highlight-row">${highlights}</div>
+    <div class="funnel-label">Funil da Fase 3</div>
+    <div class="funnel-row">${funnel}</div>`;
 }
 
 function renderContent() {
   const d = dados[active];
-  const roasCard = d.roas !== null
-    ? `<div class="metric-card"><div class="metric-label">ROAS</div><div class="metric-value">${d.roas.toFixed(1)}x</div></div>`
-    : `<div class="metric-card" style="opacity:0.4"><div class="metric-label">ROAS</div><div class="metric-value">—</div></div>`;
-  const seguidoresCard = seguidores !== null
-    ? `<div class="metric-card"><div class="metric-label">Seguidores</div><div class="metric-value">${formatarNumero(seguidores)}</div></div>`
-    : "";
+  const contentEl = document.getElementById("content");
 
-  document.getElementById("content").innerHTML = `
-    <div class="grid">
-      <div class="metric-card"><div class="metric-label">Valor gasto</div><div class="metric-value">${formatarMoeda(d.gasto)}</div></div>
-      <div class="metric-card"><div class="metric-label">Alcance</div><div class="metric-value">${formatarNumero(d.alcance)}</div></div>
-      <div class="metric-card"><div class="metric-label">Cliques no link</div><div class="metric-value">${formatarNumero(d.cliques)}</div></div>
-      <div class="metric-card"><div class="metric-label">${d.resultLabel}</div><div class="metric-value">${formatarNumero(d.resultado)}</div></div>
-      <div class="metric-card"><div class="metric-label">${d.custoLabel}</div><div class="metric-value">${formatarMoeda(d.custoPorResultado)}</div></div>
-      ${roasCard}
-      ${seguidoresCard}
-    </div>
-    ${renderBars()}
-  `;
+  if (!d) {
+    contentEl.innerHTML = `<div class="empty">Nenhuma campanha encontrada para ${labels[active]} nos últimos 7 dias.</div>`;
+    return;
+  }
+
+  if (active === "fase1") contentEl.innerHTML = renderFase1(d);
+  else if (active === "fase2") contentEl.innerHTML = renderFase2(d);
+  else if (active === "fase3") contentEl.innerHTML = renderFase3(d);
 }
 
 async function carregar() {
@@ -146,9 +255,7 @@ async function carregar() {
       document.getElementById("content").innerHTML = `<div class="error">Erro ao buscar dados: ${json.error}</div>`;
       return;
     }
-    dados = json.dados;
-    historico = json.historico_gasto || [];
-    seguidores = json.seguidores || null;
+    dados = { fase1: json.fase1, fase2: json.fase2, fase3: json.fase3 };
     document.getElementById("updated").textContent =
       "Atualizado em " + new Date(json.atualizado_em).toLocaleString("pt-BR");
     renderTabs();
